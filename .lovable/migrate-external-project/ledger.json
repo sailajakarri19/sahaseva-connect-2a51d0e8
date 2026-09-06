@@ -1,0 +1,55 @@
+{
+  "source": "https://github.com/sailajakarri19/sahaseva-connect-4d27def1",
+  "source_type": "lovable_tanstack_start",
+  "capabilities": [
+    {
+      "capability": "frontend_application",
+      "source": "src/ directory, package.json, vite.config.ts, tsconfig.json",
+      "outcome": "preserve",
+      "status": "pending",
+      "next_action": "Copy src/ and config files into destination project"
+    },
+    {
+      "capability": "routing",
+      "source": "src/routes/ — landing, auth, /app/*, /worker/*, /admin, /notifications",
+      "outcome": "preserve",
+      "status": "pending",
+      "next_action": "Copy route files; regenerate routeTree.gen.ts via build"
+    },
+    {
+      "capability": "authentication",
+      "source": "src/integrations/supabase/ auth middleware and attacher",
+      "outcome": "preserve",
+      "status": "pending",
+      "next_action": "Copy Supabase integration; enable Lovable Cloud and configure secrets"
+    },
+    {
+      "capability": "database_schema",
+      "source": "supabase/config.toml only; no migrations present",
+      "outcome": "not_found",
+      "status": "pending",
+      "next_action": "App currently uses in-code demo data; schema must be recreated if/when backend persistence is needed"
+    },
+    {
+      "capability": "database_records",
+      "source": "No database-records/manifest.json or export found",
+      "outcome": "not_found",
+      "status": "pending",
+      "next_action": "Demo data lives in src/lib/sahaseva-data.ts; no record import required for preview"
+    },
+    {
+      "capability": "environment_variables",
+      "source": "Source .env excluded from inspection",
+      "outcome": "preserve",
+      "status": "pending",
+      "next_action": "Enable Lovable Cloud so Supabase keys are injected automatically"
+    },
+    {
+      "capability": "third_party_integrations",
+      "source": "Supabase only",
+      "outcome": "preserve",
+      "status": "pending",
+      "next_action": "Enable Lovable Cloud to restore Supabase integration"
+    }
+  ]
+}
