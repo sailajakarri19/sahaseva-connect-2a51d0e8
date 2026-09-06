@@ -1,6 +1,7 @@
 import { createFileRoute, Outlet } from "@tanstack/react-router";
 import { BottomNav, Phone } from "@/components/saha/shell";
 import { useRequireRole } from "@/lib/session";
+import { useNotificationRuntime } from "@/lib/notification-inbox";
 
 export const Route = createFileRoute("/worker")({
   ssr: false,
@@ -8,6 +9,7 @@ export const Route = createFileRoute("/worker")({
 });
 
 function WorkerLayout() {
+  useNotificationRuntime();
   const session = useRequireRole("WORKER");
   if (!session) {
     return (

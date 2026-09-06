@@ -54,7 +54,7 @@ function WorkerHome() {
         subtitle={session?.org}
         right={
           <>
-            <NotificationsButton count={2} />
+            <NotificationsButton />
             <SignOutButton />
           </>
         }
