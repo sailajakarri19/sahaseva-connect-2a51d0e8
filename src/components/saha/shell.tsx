@@ -15,6 +15,8 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSignOut } from "@/lib/session";
+import { useInbox } from "@/lib/notification-inbox";
+import { useUnreadCount } from "@/lib/store";
 
 export function Logo({ compact = false }: { compact?: boolean }) {
   return (
@@ -75,22 +77,26 @@ export function SignOutButton() {
   );
 }
 
-export function NotificationsButton({ count = 3 }: { count?: number }) {
+export function NotificationsButton({ count }: { count?: number }) {
+  const inbox = useInbox();
+  const live = useUnreadCount(inbox);
+  const unread = count ?? live;
   return (
     <Link
       to="/notifications"
-      aria-label="Notifications"
+      aria-label={unread > 0 ? `Notifications, ${unread} unread` : "Notifications"}
       className="relative grid h-9 w-9 place-items-center rounded-full border bg-background text-muted-foreground transition-colors hover:bg-muted"
     >
       <Bell className="h-4 w-4" />
-      {count > 0 && (
+      {unread > 0 && (
         <span className="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-destructive px-1 text-[10px] font-bold text-destructive-foreground">
-          {count}
+          {unread > 9 ? "9+" : unread}
         </span>
       )}
     </Link>
   );
 }
+
 
 type NavItem = { to: string; label: string; icon: typeof Home };
 

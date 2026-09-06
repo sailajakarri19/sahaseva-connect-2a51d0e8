@@ -12,6 +12,13 @@
  */
 import { useCallback, useSyncExternalStore } from "react";
 import { bookings as demoBookings, workers, type BookingStatus as LegacyStatus } from "./sahaseva-data";
+import {
+  dispatchToProviders,
+  notificationService,
+  type NotificationAudience,
+  type NotificationDraft,
+  type NotificationType,
+} from "./notification-service";
 
 export type LiveStatus =
   | "Pending"
@@ -89,16 +96,20 @@ export type ReviewRecord = {
 
 export type NotificationRecord = {
   id: string;
-  audience: "customer" | "worker";
-  /** customer email or worker id */
+  audience: NotificationAudience;
+  /** customer email, worker id, or "admin" */
   target: string;
+  type: NotificationType;
   title: string;
   body: string;
   tag: string;
   bookingId?: string;
+  /** Stable key used to guarantee the same alert is never stored twice. */
+  dedupeKey: string;
   at: number;
   read: boolean;
 };
+
 
 export type DB = {
   version: number;
@@ -108,7 +119,7 @@ export type DB = {
   notifications: NotificationRecord[];
 };
 
-const KEY = "sahaseva.db.v3";
+const KEY = "sahaseva.db.v4";
 const CHANNEL = "sahaseva-db";
 
 export const bookingTotal = (b: BookingRecord) =>
@@ -330,18 +341,27 @@ const uid = (prefix: string) =>
 export const newBookingId = () =>
   `SS-B-${Math.floor(100000 + Math.random() * 899999)}`;
 
-function notify(
-  current: DB,
-  n: Omit<NotificationRecord, "id" | "at" | "read">,
-): DB {
-  return {
-    ...current,
-    notifications: [
-      { ...n, id: uid("N"), at: Date.now(), read: false },
-      ...current.notifications,
-    ],
-  };
+/**
+ * Persist notification drafts (in-app channel) and fan them out to the other
+ * enabled providers. Drafts whose dedupeKey already exists are skipped, so a
+ * repeated status change never produces a duplicate alert.
+ */
+function notify(current: DB, drafts: NotificationDraft[]): DB {
+  const seen = new Set(current.notifications.map((n) => n.dedupeKey));
+  const fresh = drafts.filter((d) => d.dedupeKey && !seen.has(d.dedupeKey));
+  if (fresh.length === 0) return current;
+  const rows: NotificationRecord[] = fresh.map((d) => ({
+    ...d,
+    id: uid("N"),
+    at: Date.now(),
+    read: false,
+  }));
+  for (const d of fresh) dispatchToProviders(d);
+  return { ...current, notifications: [...rows.reverse(), ...current.notifications] };
 }
+
+const workerName = (workerId: string) =>
+  workers.find((w) => w.id === workerId)?.name ?? "The worker";
 
 function patch(
   current: DB,
@@ -389,24 +409,14 @@ export function createBooking(
     status: "Pending",
     timeline: [{ status: "Pending", at: Date.now() }],
   };
-  const worker = workers.find((w) => w.id === booking.workerId);
   let next: DB = { ...current, bookings: [booking, ...current.bookings] };
-  next = notify(next, {
-    audience: "worker",
-    target: booking.workerId,
-    title: booking.emergency ? "Emergency job request" : "New job request",
-    body: `${booking.subservice} · ${booking.customerName} · ${booking.distanceKm} km · ₹${bookingTotal(booking)}`,
-    tag: booking.emergency ? "Emergency" : "Job",
-    bookingId: booking.id,
-  });
-  next = notify(next, {
-    audience: "customer",
-    target: booking.customerEmail,
-    title: "Booking requested",
-    body: `${booking.id} · ${booking.subservice} sent to ${worker?.name ?? "worker"}. Waiting for acceptance.`,
-    tag: "Booking",
-    bookingId: booking.id,
-  });
+  next = notify(
+    next,
+    notificationService.sendBookingCreatedNotification(booking, {
+      workerName: workerName(booking.workerId),
+      total: bookingTotal(booking),
+    }),
+  );
   persist(next);
   return { booking };
 }
@@ -414,36 +424,29 @@ export function createBooking(
 export function acceptBooking(id: string) {
   update((current) => {
     const b = current.bookings.find((x) => x.id === id);
-    if (!b) return current;
-    const worker = workers.find((w) => w.id === b.workerId);
-    let next = patch(current, id, (x) => withStep(x, "Accepted"));
-    next = notify(next, {
-      audience: "customer",
-      target: b.customerEmail,
-      title: "Booking accepted",
-      body: `${worker?.name ?? "The worker"} accepted ${b.id} · ${b.subservice}. It is now in Upcoming.`,
-      tag: "Booking",
-      bookingId: id,
-    });
-    return next;
+    if (!b || b.status !== "Pending") return current;
+    const next = patch(current, id, (x) => withStep(x, "Accepted"));
+    return notify(
+      next,
+      notificationService.sendBookingAcceptedNotification(b, {
+        workerName: workerName(b.workerId),
+      }),
+    );
   });
 }
 
 export function rejectBooking(id: string, reason = "Worker is unavailable for this slot.") {
   update((current) => {
     const b = current.bookings.find((x) => x.id === id);
-    if (!b) return current;
-    const worker = workers.find((w) => w.id === b.workerId);
-    let next = patch(current, id, (x) => withStep(x, "Rejected", reason));
-    next = notify(next, {
-      audience: "customer",
-      target: b.customerEmail,
-      title: "Booking not accepted",
-      body: `${worker?.name ?? "The worker"} could not take ${b.id} · ${b.subservice}. ${reason} You can book another worker.`,
-      tag: "Booking",
-      bookingId: id,
-    });
-    return next;
+    if (!b || b.status === "Rejected") return current;
+    const next = patch(current, id, (x) => withStep(x, "Rejected", reason));
+    return notify(
+      next,
+      notificationService.sendBookingRejectedNotification(b, {
+        workerName: workerName(b.workerId),
+        reason,
+      }),
+    );
   });
 }
 
@@ -458,44 +461,40 @@ export const workerSteps: LiveStatus[] = [
 export function advanceBooking(id: string, to: LiveStatus) {
   update((current) => {
     const b = current.bookings.find((x) => x.id === id);
-    if (!b) return current;
-    const worker = workers.find((w) => w.id === b.workerId);
-    let next = patch(current, id, (x) => withStep(x, to));
-    next = notify(next, {
-      audience: "customer",
-      target: b.customerEmail,
-      title: to === "Completed" ? "Service completed" : `Worker update: ${to}`,
-      body:
-        to === "Completed"
-          ? `${b.subservice} (${b.id}) is complete. Please rate ${worker?.name ?? "your worker"} and view the invoice.`
-          : `${worker?.name ?? "Your worker"} is now "${to}" for ${b.subservice} (${b.id}).`,
-      tag: "Booking",
-      bookingId: id,
-    });
-    return next;
+    if (!b || b.status === to) return current;
+    const next = patch(current, id, (x) => withStep(x, to));
+    const name = workerName(b.workerId);
+    const drafts =
+      to === "Completed"
+        ? notificationService.sendBookingCompletedNotification(b, { workerName: name })
+        : to === "In Service"
+          ? notificationService.sendBookingStartedNotification(b, { workerName: name })
+          : notificationService.sendBookingProgressNotification(b, {
+              workerName: name,
+              status: to,
+            });
+    return notify(next, drafts);
   });
 }
 
-export function cancelBooking(id: string, by: "customer" | "worker") {
+export function cancelBooking(id: string, by: "customer" | "worker", reason = "") {
   update((current) => {
     const b = current.bookings.find((x) => x.id === id);
-    if (!b) return current;
-    let next = patch(current, id, (x) =>
+    if (!b || b.status === "Cancelled") return current;
+    const next = patch(current, id, (x) =>
       withStep(
         { ...x, payment: x.payment === "Paid" ? "Refunded" : x.payment },
         "Cancelled",
-        `Cancelled by ${by}`,
+        reason || `Cancelled by ${by}`,
       ),
     );
-    next = notify(next, {
-      audience: by === "customer" ? "worker" : "customer",
-      target: by === "customer" ? b.workerId : b.customerEmail,
-      title: "Booking cancelled",
-      body: `${b.id} · ${b.subservice} was cancelled by the ${by}.`,
-      tag: "Booking",
-      bookingId: id,
-    });
-    return next;
+    return notify(
+      next,
+      notificationService.sendBookingCancelledNotification(b, {
+        by,
+        reason: reason || (b.payment === "Paid" ? "A refund has been initiated." : ""),
+      }),
+    );
   });
 }
 
@@ -510,8 +509,8 @@ export function setPayment(
 ) {
   update((current) => {
     const b = current.bookings.find((x) => x.id === id);
-    if (!b) return current;
-    let next = patch(current, id, (x) => ({
+    if (!b || b.payment === payload.status) return current;
+    const next = patch(current, id, (x) => ({
       ...x,
       payment: payload.status,
       ...(payload.method ? { paymentMethod: payload.method } : {}),
@@ -519,15 +518,36 @@ export function setPayment(
       ...(payload.status === "Paid" ? { paidAt: Date.now() } : {}),
       ...(payload.demo !== undefined ? { demoPayment: payload.demo } : {}),
     }));
-    if (payload.status === "Paid") {
-      next = notify(next, {
-        audience: "worker",
-        target: b.workerId,
-        title: "Payment received",
-        body: `₹${bookingTotal(b)} recorded for ${b.id} · ${b.subservice}.`,
-        tag: "Payment",
-        bookingId: id,
-      });
+    return notify(
+      next,
+      notificationService.sendPaymentNotification(b, {
+        status: payload.status,
+        total: bookingTotal(b),
+        ...(payload.method ? { method: payload.method } : {}),
+      }),
+    );
+  });
+}
+
+/**
+ * Reminder sweep for bookings starting soon. Safe to call on a timer: the
+ * dedupe key keeps exactly one reminder per booking.
+ */
+export function runUpcomingReminders(windowMinutes = 60) {
+  update((current) => {
+    const now = Date.now();
+    let next = current;
+    for (const b of current.bookings) {
+      if (!isUpcoming(b.status)) continue;
+      const diff = b.startAt - now;
+      if (diff <= 0 || diff > windowMinutes * 60_000) continue;
+      next = notify(
+        next,
+        notificationService.sendUpcomingBookingNotification(b, {
+          minutes: Math.max(1, Math.round(diff / 60_000)),
+          workerName: workerName(b.workerId),
+        }),
+      );
     }
     return next;
   });
@@ -536,20 +556,12 @@ export function setPayment(
 export function sendMessage(bookingId: string, from: "customer" | "worker", text: string) {
   update((current) => {
     const b = current.bookings.find((x) => x.id === bookingId);
+    const at = Date.now();
     let next: DB = {
       ...current,
-      messages: [...current.messages, { id: uid("M"), bookingId, from, text, at: Date.now() }],
+      messages: [...current.messages, { id: uid("M"), bookingId, from, text, at }],
     };
-    if (b) {
-      next = notify(next, {
-        audience: from === "customer" ? "worker" : "customer",
-        target: from === "customer" ? b.workerId : b.customerEmail,
-        title: "New message",
-        body: text.slice(0, 90),
-        tag: "Message",
-        bookingId,
-      });
-    }
+    if (b) next = notify(next, notificationService.sendMessageNotification(b, { from, text, at }));
     return next;
   });
 }
@@ -574,26 +586,61 @@ export function addReview(bookingId: string, stars: number, comment: string) {
         ...next.reviews,
       ],
     };
-    next = notify(next, {
-      audience: "worker",
-      target: b.workerId,
-      title: `New ${stars}-star rating`,
-      body: comment ? comment.slice(0, 90) : `Rated for ${b.subservice} (${b.id}).`,
-      tag: "Rating",
-      bookingId,
-    });
-    return next;
+    return notify(next, notificationService.sendRatingNotification(b, { stars, comment }));
   });
 }
 
-export function markNotificationsRead(audience: "customer" | "worker", target: string) {
+/* ---------------------------------------------------- notification centre */
+
+/** Where the signed-in user's notifications are addressed. */
+export type NotificationInbox = { audience: NotificationAudience; target: string };
+
+export function inboxNotifications(db: DB, inbox: NotificationInbox | null) {
+  if (!inbox) return [] as NotificationRecord[];
+  return db.notifications
+    .filter((n) => n.audience === inbox.audience && n.target === inbox.target)
+    .sort((a, b) => b.at - a.at);
+}
+
+/** Live unread count for the bell badge. */
+export function useUnreadCount(inbox: NotificationInbox | null) {
+  const db = useDB();
+  if (!inbox) return 0;
+  return db.notifications.filter(
+    (n) => n.audience === inbox.audience && n.target === inbox.target && !n.read,
+  ).length;
+}
+
+export function useNotifications(inbox: NotificationInbox | null) {
+  const db = useDB();
+  return inboxNotifications(db, inbox);
+}
+
+export function markNotificationRead(id: string) {
+  update((current) => ({
+    ...current,
+    notifications: current.notifications.map((n) => (n.id === id ? { ...n, read: true } : n)),
+  }));
+}
+
+export function markNotificationsRead(audience: NotificationAudience, target: string) {
   update((current) => ({
     ...current,
     notifications: current.notifications.map((n) =>
-      n.audience === audience && n.target === target ? { ...n, read: true } : n,
+      n.audience === audience && n.target === target && !n.read ? { ...n, read: true } : n,
     ),
   }));
 }
+
+export function clearNotifications(audience: NotificationAudience, target: string) {
+  update((current) => ({
+    ...current,
+    notifications: current.notifications.filter(
+      (n) => !(n.audience === audience && n.target === target),
+    ),
+  }));
+}
+
 
 /** Worker rating recalculated from the base profile plus live reviews. */
 export function workerRating(workerId: string, reviews: ReviewRecord[]) {
