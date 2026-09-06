@@ -12,6 +12,13 @@
  */
 import { useCallback, useSyncExternalStore } from "react";
 import { bookings as demoBookings, workers, type BookingStatus as LegacyStatus } from "./sahaseva-data";
+import {
+  dispatchToProviders,
+  notificationService,
+  type NotificationAudience,
+  type NotificationDraft,
+  type NotificationType,
+} from "./notification-service";
 
 export type LiveStatus =
   | "Pending"
