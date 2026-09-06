@@ -1,7 +1,18 @@
-import { createFileRoute, useRouter } from "@tanstack/react-router";
-import { ArrowLeft, Bell } from "lucide-react";
+import { useMemo } from "react";
+import { createFileRoute, useNavigate, useRouter } from "@tanstack/react-router";
+import { ArrowLeft, BellOff, CheckCheck } from "lucide-react";
 import { Phone, AppHeader, Pill } from "@/components/saha/shell";
 import { useSession } from "@/lib/session";
+import { useInbox, useNotificationRuntime } from "@/lib/notification-inbox";
+import {
+  clearNotifications,
+  markNotificationRead,
+  markNotificationsRead,
+  useDB,
+  useNotifications,
+  type NotificationRecord,
+} from "@/lib/store";
+import { workers } from "@/lib/sahaseva-data";
 
 export const Route = createFileRoute("/notifications")({
   head: () => ({
@@ -10,10 +21,10 @@ export const Route = createFileRoute("/notifications")({
       {
         name: "description",
         content:
-          "Booking, payment, verification, welfare and demand alerts for every SahaSeva role.",
+          "Live booking, payment and service alerts for SahaSeva customers, workers and admins.",
       },
       { property: "og:title", content: "Notifications · SahaSeva" },
-      { property: "og:description", content: "Role-aware notification centre." },
+      { property: "og:description", content: "Role-aware notification centre with live updates." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
     ],
@@ -21,70 +32,156 @@ export const Route = createFileRoute("/notifications")({
   component: Notifications,
 });
 
-const feed = {
-  CUSTOMER: [
-    { t: "Booking accepted", d: "Suresh Yadav accepted your tap repair booking.", tag: "Booking", time: "2 min ago" },
-    { t: "Worker is on the way", d: "ETA 16 minutes · 2.6 km away.", tag: "Booking", time: "1 min ago" },
-    { t: "Invoice ready", d: "Deep cleaning invoice SS-B-90201 · ₹1,850 paid.", tag: "Payment", time: "Yesterday" },
-  ],
-  WORKER: [
-    { t: "New job request", d: "Fan repair · Kondapur · 1.8 km · ₹300 est.", tag: "Job", time: "Just now" },
-    { t: "Payment received", d: "₹1,450 credited to your cooperative payout account.", tag: "Payment", time: "3 h ago" },
-    { t: "Insurance renewal reminder", d: "Group insurance renews in 42 days.", tag: "Welfare", time: "2 d ago" },
-  ],
-  ADMIN: [
-    { t: "Worker verification pending", d: "New cooperative worker registrations await your approval.", tag: "Verification", time: "20 min ago" },
-    { t: "Fraud pattern flagged", d: "3 repeated cancellations from one account.", tag: "Fraud", time: "15 min ago" },
-    { t: "Society report ready", d: "Monthly performance for 4 societies.", tag: "Report", time: "Today" },
-    { t: "Complaint escalated", d: "Unexpected charge dispute · SS-B-90155.", tag: "Complaint", time: "2 h ago" },
-  ],
-} as const;
+const toneFor = (tag: string) =>
+  tag === "Emergency"
+    ? "danger"
+    : tag === "Payment"
+      ? "success"
+      : tag === "Job"
+        ? "primary"
+        : tag === "Rating"
+          ? "accent"
+          : "muted";
+
+function timeAgo(at: number) {
+  const s = Math.max(1, Math.round((Date.now() - at) / 1000));
+  if (s < 60) return "Just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} h ago`;
+  const d = Math.round(h / 24);
+  return d === 1 ? "Yesterday" : `${d} d ago`;
+}
+
+const stamp = (at: number) =>
+  new Date(at).toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 
 function Notifications() {
   const { session } = useSession();
   const router = useRouter();
-  const items: readonly { t: string; d: string; tag: string; time: string }[] = session
-    ? feed[session.role]
-    : feed.CUSTOMER;
+  const navigate = useNavigate();
+  const inbox = useInbox();
+  const db = useDB();
+  const items = useNotifications(inbox);
+  useNotificationRuntime();
+
+  const unread = items.filter((n) => !n.read).length;
+  const { fresh, earlier } = useMemo(
+    () => ({
+      fresh: items.filter((n) => !n.read),
+      earlier: items.filter((n) => n.read),
+    }),
+    [items],
+  );
+
+  const open = (n: NotificationRecord) => {
+    markNotificationRead(n.id);
+    if (!n.bookingId) return;
+    if (session?.role === "WORKER") navigate({ to: "/worker/jobs" });
+    else if (session?.role === "ADMIN") navigate({ to: "/admin" });
+    else navigate({ to: "/app/bookings" });
+  };
+
+  const Row = ({ n }: { n: NotificationRecord }) => {
+    const booking = db.bookings.find((b) => b.id === n.bookingId);
+    const worker = booking ? workers.find((w) => w.id === booking.workerId) : undefined;
+    return (
+      <button
+        onClick={() => open(n)}
+        className={`w-full rounded-2xl border p-3 text-left transition-colors hover:bg-muted/60 ${
+          n.read ? "bg-card" : "border-primary/40 bg-secondary/50"
+        }`}
+      >
+        <div className="flex items-start justify-between gap-2">
+          <p className="text-sm font-bold">{n.title}</p>
+          <Pill tone={toneFor(n.tag)}>{n.tag}</Pill>
+        </div>
+        <p className="mt-1 text-xs text-muted-foreground">{n.body}</p>
+        {booking && (
+          <p className="mt-1 text-[11px] font-semibold text-primary">
+            {booking.id} · {booking.subservice}
+            {worker ? ` · ${worker.name}` : ""} · {booking.status}
+          </p>
+        )}
+        <p className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
+          <span>{timeAgo(n.at)}</span>
+          <span>·</span>
+          <span>{stamp(n.at)}</span>
+          {!n.read && <span className="font-bold text-primary">· Unread</span>}
+        </p>
+      </button>
+    );
+  };
 
   return (
     <Phone>
       <AppHeader
         title="Notifications"
-        subtitle="Alerts in your preferred language"
+        subtitle={unread > 0 ? `${unread} unread` : "You are all caught up"}
         right={
           <button
             onClick={() => router.history.back()}
-            className="grid h-9 w-9 place-items-center rounded-full border bg-background"
-            aria-label="Back"
+            aria-label="Go back"
+            className="grid h-9 w-9 place-items-center rounded-full border bg-background text-muted-foreground transition-colors hover:bg-muted"
           >
             <ArrowLeft className="h-4 w-4" />
           </button>
         }
       />
-      <ul className="space-y-2 p-4">
-        {items.map((n) => (
-          <li key={n.t} className="rounded-2xl border bg-card p-4 shadow-card">
-            <div className="flex items-start gap-3">
-              <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-secondary text-secondary-foreground">
-                <Bell className="h-4 w-4" />
-              </div>
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <p className="text-sm font-bold">{n.t}</p>
-                  <Pill tone="primary">{n.tag}</Pill>
-                </div>
-                <p className="mt-1 text-sm text-muted-foreground">{n.d}</p>
-                <p className="mt-1 text-[11px] text-muted-foreground">{n.time}</p>
-              </div>
-            </div>
-          </li>
-        ))}
-      </ul>
-      <p className="px-4 pb-8 text-xs text-muted-foreground">
-        Notification preferences: booking, payment, welfare and announcement alerts can be turned
-        on or off per channel from your profile settings.
-      </p>
+
+      <div className="space-y-4 p-4">
+        {inbox && items.length > 0 && (
+          <div className="flex gap-2">
+            <button
+              onClick={() => markNotificationsRead(inbox.audience, inbox.target)}
+              className="flex flex-1 items-center justify-center gap-1 rounded-full border px-3 py-2 text-xs font-bold"
+            >
+              <CheckCheck className="h-3.5 w-3.5" /> Mark all read
+            </button>
+            <button
+              onClick={() => clearNotifications(inbox.audience, inbox.target)}
+              className="flex flex-1 items-center justify-center gap-1 rounded-full border px-3 py-2 text-xs font-bold text-muted-foreground"
+            >
+              <BellOff className="h-3.5 w-3.5" /> Clear history
+            </button>
+          </div>
+        )}
+
+        {items.length === 0 && (
+          <p className="rounded-2xl border border-dashed p-6 text-center text-sm text-muted-foreground">
+            No notifications yet. Booking, service and payment updates will appear here
+            automatically.
+          </p>
+        )}
+
+        {fresh.length > 0 && (
+          <section className="space-y-2">
+            <h2 className="text-xs font-bold uppercase tracking-widest text-muted-foreground">
+              New
+            </h2>
+            {fresh.map((n) => (
+              <Row key={n.id} n={n} />
+            ))}
+          </section>
+        )}
+
+        {earlier.length > 0 && (
+          <section className="space-y-2">
+            <h2 className="text-xs font-bold uppercase tracking-widest text-muted-foreground">
+              Earlier
+            </h2>
+            {earlier.map((n) => (
+              <Row key={n.id} n={n} />
+            ))}
+          </section>
+        )}
+      </div>
     </Phone>
   );
 }
