@@ -89,16 +89,20 @@ export type ReviewRecord = {
 
 export type NotificationRecord = {
   id: string;
-  audience: "customer" | "worker";
-  /** customer email or worker id */
+  audience: NotificationAudience;
+  /** customer email, worker id, or "admin" */
   target: string;
+  type: NotificationType;
   title: string;
   body: string;
   tag: string;
   bookingId?: string;
+  /** Stable key used to guarantee the same alert is never stored twice. */
+  dedupeKey: string;
   at: number;
   read: boolean;
 };
+
 
 export type DB = {
   version: number;
