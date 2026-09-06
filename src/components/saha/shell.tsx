@@ -15,6 +15,8 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSignOut } from "@/lib/session";
+import { useInbox } from "@/lib/notification-inbox";
+import { useUnreadCount } from "@/lib/store";
 
 export function Logo({ compact = false }: { compact?: boolean }) {
   return (
